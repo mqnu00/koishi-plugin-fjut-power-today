@@ -5,12 +5,49 @@ import { error } from 'console'
 
 export const name = 'fjut-power-today'
 
-export interface Config { }
+export const inject = ['puppeteer', 'database']
 
-export const Config: Schema<Config> = Schema.object({})
+export const usage = `
 
-export const inject = ['puppeteer']
 
+
+<h2>插件简介</h2>
+<p><code>福建理工大学宿舍电费提醒插件</code></p>
+
+<h2>使用提示</h2>
+<p><code>today (floor) (room): 查询宿舍当天电量 </code></p>
+<p><code>alert (floor) (room): 设置宿舍电量定时提醒（默认每天早上9点）</code></p>
+<p><code>undo: 取消定时提醒</code></p>
+
+`;
+
+declare module 'koishi' {
+    interface Tables {
+        fjut_power_today: {
+            id: number
+            group_id: string
+            self_id: string
+            self_platform: string
+            floor: string
+            room: string
+        }
+    }
+}
+
+export interface Config {
+
+    alertTimerRestore: boolean
+}
+
+export const Config: Schema<Config> = Schema.object({
+
+    alertTimerRestore: Schema
+    .boolean()
+    .default(false)
+    .description('为true，则插件重启后向宿舍群发布恢复定时提醒的通知')
+})
+
+// 获取当日宿舍剩余电量
 async function get_power(ctx: Context, room_val, floor: string, room: string){
     try {
         let room_info = get_floor_room_id(room_val, floor, room)
@@ -29,6 +66,7 @@ async function get_power(ctx: Context, room_val, floor: string, room: string){
     }
 }
 
+// 将楼号和宿舍号转换成id
 function get_floor_room_id(room_val, floor: string, room: string){
     try {
         let floor_id: number, room_id: number;
@@ -55,6 +93,7 @@ function get_floor_room_id(room_val, floor: string, room: string){
     }
 }
 
+// 获取昨日使用的电量
 async function get_last_day_use(ctx: Context, room_val, floor, room){
     try {
         let room_info = get_floor_room_id(room_val, floor, room)
@@ -73,6 +112,7 @@ async function get_last_day_use(ctx: Context, room_val, floor, room){
     }
 }
 
+// 将获取到的今天剩余电量和昨天的用电量整理成string
 async function format_power(ctx: Context, room_val, floor: string, room: string) {
     let today_have;
     let last_day_use;
@@ -99,7 +139,8 @@ async function format_power(ctx: Context, room_val, floor: string, room: string)
     return `${floor} ${room}\n${today_have}\n${last_day_use.elecdate}: 已用${last_day_use.useelec}度，花费${Math.round(last_day_use.useelec*0.533*100)/100}元`
 }
 
-export async function alert_power(ctx: Context, room_val, floor, room) {
+// 定时
+export async function alert_power(ctx: Context, group_id, self_id, self_platform, room_val, floor, room) {
     // 获取当前日期
     const now = new Date();
     // 创建一个新的日期对象，表示明天早上九点
@@ -107,20 +148,51 @@ export async function alert_power(ctx: Context, room_val, floor, room) {
     // 计算时间戳差值
     const diff = tomorrow9am.getTime() - now.getTime();
     ctx.setTimeout(async () => {
-        const bot = ctx.bots[`onebot:3491108692`]
+        const bot = ctx.bots[`${self_platform}:${self_id}`]
         const res_list = await format_power(ctx, room_val, floor, room)
-        bot.sendMessage('790332177', res_list)
+        bot.sendMessage(group_id, res_list)
     }, diff)
-    ctx.timer.setTimeout(() => {
-        alert_power(ctx, room_val, floor, room)
+    return ctx.setTimeout(() => {
+        alert_power(ctx, room_val, group_id, self_id, self_platform, floor, room)
     }, diff)
 }
 
-export async function apply(ctx: Context) {
+export async function apply(ctx: Context, config: Config) {
+
+    ctx.database.extend('fjut_power_today', {
+        id: 'unsigned',
+        group_id: 'string',
+        self_id: 'string',
+        self_platform: 'string',
+        floor: 'string',
+        room: 'string'
+    })
 
     const room_val = JSON.parse(JSON.stringify(rooms))
+
+    let timer_callback: { [key: string]: () => void } = {}
+
+    ctx.on('ready', async () => {
+
+        const result = await ctx.database.get('fjut_power_today', {})
+        for (let i = 0; i < result.length; i++) {
+            let callback = await alert_power(
+                ctx,
+                result[i].group_id,
+                result[i].self_id,
+                result[i].self_platform,
+                room_val,
+                result[i].floor,
+                result[i].room
+            )
+            const bot = ctx.bots[`${result[i].self_platform}:${result[i].self_id}`]
+            timer_callback[result[i].group_id] = callback
+            if (config.alertTimerRestore) {
+                bot.sendMessage(result[i].group_id, '机器人重启，不用担心，你的定时提醒已恢复')
+            }
+        }
+    })
     // write your plugin here
-    alert_power(ctx, room_val, 'C5', '204')
 
     ctx.command('power/today <floor> <room>', '（查询宿舍电量）使用方法：power.today C1 707')
     .action(async ({session}, floor, room) => {
@@ -129,5 +201,54 @@ export async function apply(ctx: Context) {
         // return format_power(ctx)
     })
     
-    ctx.command('power/alert <floor <room>>', '（开发中）（设置宿舍电量提醒，默认早上9点）使用方法：power.today C1 707')
+    ctx.command('power/alert <floor> <room>', '（设置宿舍电量提醒，默认早上9点）使用方法：power.today C1 707')
+    .action(async ({session}, floor, room) => {
+
+        if (!session.guildId) {
+            return '这条命令只能在群聊使用'
+        }
+
+        const roles = session.author.roles
+        console.log(roles)
+        if (roles.includes('member')) return '群管理员或群主能执行这条指令' 
+        if (floor == null || room == null) return '没有写哪栋楼或者宿舍号'
+        let self_id = session.selfId
+        let self_platform = session.platform
+        let group_id = session.guildId
+        await ctx.database.remove('fjut_power_today', {group_id: group_id})
+        const result = await ctx.database.create('fjut_power_today', {
+            id: null,
+            group_id: group_id,
+            self_id: self_id,
+            self_platform: self_platform,
+            floor: floor,
+            room: room
+        })
+        if (result) {
+            let callback = await alert_power(ctx, room_val, group_id, self_id, self_platform, floor, room)
+            timer_callback[group_id] = callback
+            return '定时成功，以后每天早上9点提醒宿舍电费信息'
+        } else {
+            return '出现BUG，请反馈给 qq 647983952'
+        }
+    })
+
+    ctx.command('power/undo', '取消定时提醒')
+    .action(async ({session}, floor, room) => {
+
+        if (!session.guildId) {
+            return '这条命令只能在群聊使用'
+        }
+
+        const roles = session.author.roles
+        if (roles.includes('member')) return '群管理员或群主能执行这条指令' 
+        await ctx.database.remove('fjut_power_today', {group_id: session.guildId})
+        if (timer_callback[session.guildId]) {
+            await timer_callback[session.guildId]()
+            delete timer_callback[session.guildId]
+            return '已取消定时'
+        } else {
+            return '你没有设置定时'
+        }
+    })
 }
