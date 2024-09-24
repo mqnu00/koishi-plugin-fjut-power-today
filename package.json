@@ -21,9 +21,13 @@
     "koishi-plugin-puppeteer": "^3.5.0"
   },
   "koishi": {
+    "description": {
+      "zh": "提醒FJUT宿舍电量"
+    },
     "service": {
       "required": [
-        "puppeteer"
+        "puppeteer",
+        "database"
       ]
     }
   }
