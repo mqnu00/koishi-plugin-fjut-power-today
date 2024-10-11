@@ -1,7 +1,8 @@
 import { Context, Schema } from 'koishi'
 import {} from 'koishi-plugin-puppeteer'
 import rooms from './room.json' 
-import { error } from 'console'
+import { error, time } from 'console'
+import { resolve } from 'path'
 
 export const name = 'fjut-power-today'
 
@@ -116,10 +117,25 @@ async function get_last_day_use(ctx: Context, room_val, floor, room){
 async function format_power(ctx: Context, room_val, floor: string, room: string) {
     let today_have;
     let last_day_use;
+    let check = 0
+    let check_limit = 10
     do {
         if (today_have == 'wrong' || today_have == null) today_have = await get_power(ctx, room_val, floor, room)
         if (last_day_use == 'wrong' || last_day_use == null) last_day_use = await get_last_day_use(ctx, room_val, floor, room)
-    } while (today_have == "wrong" || last_day_use == 'wrong')
+        if (last_day_use == "Cannot read properties of undefined (reading '0')") {
+            await new Promise(resolve => setTimeout(resolve, 5000))
+            last_day_use = await get_last_day_use(ctx, room_val, floor, room)
+            check = check + 1
+        }
+        if (today_have == "Cannot read properties of undefined (reading '0')") {
+            await new Promise(resolve => setTimeout(resolve, 5000))
+            today_have = await get_power(ctx, room_val, floor, room)
+            check = check + 1
+        }
+        if (check > check_limit) break
+        // console.log(last_day_use)
+        // console.log(today_have)
+        } while (today_have == "wrong" || last_day_use == 'wrong' || last_day_use == "Cannot read properties of undefined (reading '0')" || today_have == "Cannot read properties of undefined (reading '0')")
 
     today_have = today_have.replace(/\\u([\d\w]{4})/gi, (_, match) => 
     String.fromCharCode(parseInt(match, 16))
@@ -127,16 +143,22 @@ async function format_power(ctx: Context, room_val, floor: string, room: string)
     last_day_use = last_day_use.replace(/\\u([\d\w]{4})/gi, (_, match) => 
         String.fromCharCode(parseInt(match, 16))
         );
-    try {
+    if (today_have == "Cannot read properties of undefined (reading '0')") {
+        today_have = '接口调用频繁，无法返回今日剩余电量'
+    } else {
         today_have = JSON.parse(today_have)
         today_have = today_have.elec
-    } catch (error) {
-        
     }
     
-    last_day_use = JSON.parse(last_day_use)
-    last_day_use = last_day_use.list[0]
-    return `${floor} ${room}\n${today_have}\n${last_day_use.elecdate}: 已用${last_day_use.useelec}度，花费${Math.round(last_day_use.useelec*0.533*100)/100}元`
+    if (last_day_use == "Cannot read properties of undefined (reading '0')") {
+        last_day_use = '接口调用频繁，无法返回昨日用电量'
+    }
+    else {
+        last_day_use = JSON.parse(last_day_use)
+        last_day_use = last_day_use.list[0]
+    } 
+    if(check <= check_limit) return `${floor} ${room}\n${today_have}\n${last_day_use.elecdate}: 已用${last_day_use.useelec}度，花费${Math.round(last_day_use.useelec*0.533*100)/100}元`
+    else return `${floor} ${room}\n${today_have}\n${last_day_use}`
 }
 
 // 定时
@@ -147,14 +169,23 @@ export async function alert_power(ctx: Context, group_id, self_id, self_platform
     const tomorrow9am = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 9, 0, 0);
     // 计算时间戳差值
     const diff = tomorrow9am.getTime() - now.getTime();
+    // const diff = 5000;
     ctx.setTimeout(async () => {
         const bot = ctx.bots[`${self_platform}:${self_id}`]
+        // console.log("???", self_platform, self_id)
         const res_list = await format_power(ctx, room_val, floor, room)
+        // console.log(res_list)
         bot.sendMessage(group_id, res_list)
     }, diff)
-    return ctx.setTimeout(() => {
-        alert_power(ctx, room_val, group_id, self_id, self_platform, floor, room)
-    }, diff)
+    let result = await ctx.database.get('fjut_power_today', {group_id: group_id})
+    for (let i = 0; i < result.length; i++) {
+        if (group_id == result[i].group_id) {
+            return ctx.setTimeout(() => {
+                alert_power(ctx, group_id, self_id, self_platform, room_val, floor, room)
+            }, diff)
+        }
+    }
+    return null
 }
 
 export async function apply(ctx: Context, config: Config) {

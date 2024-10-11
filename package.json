@@ -1,7 +1,7 @@
 {
   "name": "koishi-plugin-fjut-power-today",
   "description": "提醒FJUT宿舍电量",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "files": [
